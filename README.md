@@ -11,7 +11,9 @@ While your agent works, every change it makes becomes a short card in the Kennin
 - **One quick question.** A 15-second check on what the change actually does. It's not trivia.
 - **Flag it, and the agent fixes it.** Write what's wrong and Kenning hands it straight to Claude Code, which addresses it *before it finishes*. If Claude is idle, it arrives with your next message.
 
-Your **understanding score** and daily streak show how much of today's AI code you actually understood. The *lines waiting* counter shows what you haven't looked at yet.
+Code on the cards is syntax-highlighted in your theme's colours. In an edited line, only the part that changed lights up, so `1.2 → 1.25` stands out at a glance.
+
+Your **understanding score** and daily streak show how much of today's AI code you actually understood. The *lines waiting* counter shows what you haven't looked at yet. **Share today** saves an image of your score, ready to post.
 
 ## Getting started
 

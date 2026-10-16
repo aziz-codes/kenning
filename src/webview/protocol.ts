@@ -12,6 +12,8 @@ export interface CardView {
   risks: Risk[];
   lines: DiffLine[];
   hiddenLines: number;
+  /** highlight.js language id. */
+  lang?: string;
   ai: {
     status: "off" | "loading" | "ready" | "error";
     summary?: string;
@@ -52,4 +54,5 @@ export type FromView =
   | { type: "retryAi"; key: string }
   | { type: "connectClaude" }
   | { type: "reviewUncommitted" }
-  | { type: "setupAi" };
+  | { type: "setupAi" }
+  | { type: "shareImage"; dataUrl: string };

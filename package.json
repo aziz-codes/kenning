@@ -2,7 +2,7 @@
   "name": "kenning",
   "displayName": "Kenning — Understand the code your AI writes",
   "description": "While Claude Code or any coding agent works, Kenning turns its changes into quick review cards: what changed, risky edits flagged, one quick question — and a one-click flag the agent fixes before it finishes.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "azizcodes",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -136,7 +136,67 @@
           "description": "Show a notification when the agent finishes and changes are waiting."
         }
       }
-    }
+    },
+    "walkthroughs": [
+      {
+        "id": "start",
+        "title": "Get started with Kenning",
+        "description": "Understand every change your AI agent makes, while it works.",
+        "steps": [
+          {
+            "id": "connect",
+            "title": "Connect Claude Code",
+            "description": "Kenning plugs into Claude Code with three small, personal hooks.\n[Connect Claude Code](command:kenning.connectClaude)",
+            "media": {
+              "markdown": "media/walkthrough/connect.md"
+            },
+            "completionEvents": [
+              "onCommand:kenning.connectClaude"
+            ]
+          },
+          {
+            "id": "review",
+            "title": "Review while your agent works",
+            "description": "Every change becomes a card: what changed, what looks risky, and one quick question. Answer with 1–4.\n[Open Kenning](command:kenning.focus)",
+            "media": {
+              "image": "media/walkthrough/card.png",
+              "altText": "A Kenning card showing a highlighted diff, a summary and a quick question"
+            },
+            "completionEvents": [
+              "onView:kenning.deck"
+            ]
+          },
+          {
+            "id": "flag",
+            "title": "Flag it, and the agent fixes it",
+            "description": "Press F on a card, say what is wrong, and Claude addresses it before it finishes.",
+            "media": {
+              "markdown": "media/walkthrough/flag.md"
+            }
+          },
+          {
+            "id": "other",
+            "title": "Using another agent?",
+            "description": "Codex, Cursor, Copilot and Aider work too, with nothing to set up.\n[Review uncommitted changes](command:kenning.reviewUncommitted)",
+            "media": {
+              "markdown": "media/walkthrough/other.md"
+            },
+            "completionEvents": [
+              "onCommand:kenning.reviewUncommitted"
+            ]
+          },
+          {
+            "id": "share",
+            "title": "Share your score",
+            "description": "Click “Share today” under your score to save an image of how much of today’s AI code you understood.",
+            "media": {
+              "image": "media/walkthrough/share.png",
+              "altText": "A share card: Of the code my AI wrote today, I truly understood 86%"
+            }
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs",
@@ -153,11 +213,13 @@
     "diff": "^9.0.0"
   },
   "devDependencies": {
+    "@fontsource-variable/newsreader": "^5.3.0",
     "@types/node": "^24.19.2",
     "@types/vscode": "^1.90.0",
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",
+    "highlight.js": "^11.12.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }

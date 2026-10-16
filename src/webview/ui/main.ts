@@ -1,4 +1,6 @@
 import type { CardView, FromView, ViewState } from "../protocol";
+import { highlightLine } from "./highlight";
+import { drawShareCard } from "./share";
 
 declare function acquireVsCodeApi(): { postMessage(m: FromView): void; getState(): unknown; setState(s: unknown): void };
 
@@ -58,6 +60,7 @@ function header(s: ViewState) {
         <span title="Days in a row with 3+ reviews"><b>${t.streak}</b> day streak</span>
         <span title="Added lines you haven't reviewed yet" class="${s.pendingLines ? "debt" : ""}"><b>${s.pendingLines}</b> lines waiting</span>
       </div>
+      ${t.reviewed ? `<button class="link small share" data-act="share" title="Save an image of today's score to share">Share today ↗</button>` : ""}
     </div>
   </section>`;
 }
@@ -77,7 +80,8 @@ function diff(c: CardView) {
     .map((l) => {
       const no = l.kind === "del" ? l.oldNo : l.newNo;
       const sign = l.kind === "add" ? "+" : l.kind === "del" ? "−" : " ";
-      return `<div class="dl ${l.kind}"><span class="no">${no ?? ""}</span><span class="sg">${sign}</span><span class="tx">${esc(l.text) || " "}</span></div>`;
+      const em = l.em?.length ? ` data-em="${l.em.map(([a, b]) => `${a},${b}`).join(";")}"` : "";
+      return `<div class="dl ${l.kind}"><span class="no">${no ?? ""}</span><span class="sg">${sign}</span><span class="tx"${em}>${highlightLine(l.text, c.lang) || " "}</span></div>`;
     })
     .join("");
   return `
@@ -217,6 +221,28 @@ function emptyState(s: ViewState) {
   </div>`;
 }
 
+/** Wraps characters [start, end) of an element's text in <mark>, across highlight spans. */
+function emphasize(el: HTMLElement, start: number, end: number) {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+  let pos = 0;
+  for (const node of nodes) {
+    const len = node.data.length;
+    const from = Math.max(start, pos);
+    const to = Math.min(end, pos + len);
+    if (from < to) {
+      const mid = node.splitText(from - pos);
+      mid.splitText(to - from);
+      const mark = document.createElement("mark");
+      mark.className = "em";
+      mid.replaceWith(mark);
+      mark.appendChild(mid);
+    }
+    pos += len;
+  }
+}
+
 // ── Render ──────────────────────────────────────────────────────────────────
 
 function render() {
@@ -231,6 +257,12 @@ function render() {
       ${current ? `${deckNav(s)}${card(current, s)}` : emptyState(s)}
     </main>
     ${current ? `<footer class="keys"><span><span class="kbd">1</span>–<span class="kbd">4</span> answer</span><span><span class="kbd">D</span> diff</span><span><span class="kbd">←</span><span class="kbd">→</span> move</span></footer>` : ""}`;
+
+  root.querySelectorAll<HTMLElement>(".tx[data-em]").forEach((el) => {
+    // Right to left, so earlier offsets stay valid as nodes are split.
+    const ranges = el.dataset.em!.split(";").map((r) => r.split(",").map(Number));
+    for (const [a, b] of ranges.reverse()) emphasize(el, a, b);
+  });
 
   const ta = document.getElementById("flag-text") as HTMLTextAreaElement | null;
   if (ta) {
@@ -298,6 +330,9 @@ root.addEventListener("click", (e) => {
       return send({ type: "reviewUncommitted" });
     case "setupAi":
       return send({ type: "setupAi" });
+    case "share":
+      if (state) void drawShareCard(state).then((dataUrl) => send({ type: "shareImage", dataUrl }));
+      return;
   }
 });
 

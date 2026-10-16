@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
 import { formatFlagsForAgent } from "./core/flags";
 import { addKenningHooks, hasKenningHooks, removeKenningHooks } from "./core/hooksConfig";
 import { firstChangedLine, hunkToText } from "./core/hunks";
+import { languageFor, markInlineChanges } from "./core/inline";
 import type { Outcome } from "./core/types";
 import { Insights, type InsightConfig, type Provider } from "./services/insights";
 import { Review, type Entry } from "./services/review";
@@ -358,7 +360,8 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
         added: hunk.added,
         removed: hunk.removed,
         risks: e.card.risks,
-        lines: hunk.lines.slice(0, MAX_CARD_LINES),
+        lines: markInlineChanges(hunk.lines.slice(0, MAX_CARD_LINES)),
+        lang: languageFor(hunk.file),
         hiddenLines: Math.max(0, hunk.lines.length - MAX_CARD_LINES),
         ai: !ins
           ? { status: cfg.provider === "off" ? "off" : "loading" }
@@ -467,6 +470,8 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
         return this.reviewUncommitted();
       case "setupAi":
         return this.setupAi();
+      case "shareImage":
+        return this.saveShareImage(m.dataUrl);
     }
   }
 
@@ -602,6 +607,25 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     this.refresh();
     await vscode.commands.executeCommand("kenning.focus");
     if (!added && !this.entries.length) vscode.window.showInformationMessage("Kenning: no uncommitted changes to review.");
+  }
+
+  // ── Share card ───────────────────────────────────────────────────────────
+  private async saveShareImage(dataUrl: string) {
+    const match = /^data:image\/png;base64,(.+)$/.exec(dataUrl);
+    if (!match) return;
+    const d = new Date();
+    const name = `kenning-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}.png`;
+    const home = vscode.Uri.file(os.homedir());
+    const target = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.joinPath(home, name),
+      filters: { Image: ["png"] },
+      title: "Save today's Kenning card",
+    });
+    if (!target) return;
+    await vscode.workspace.fs.writeFile(target, Buffer.from(match[1], "base64"));
+    const choice = await vscode.window.showInformationMessage("Your Kenning card is saved, ready to share.", "Open", "Show in folder");
+    if (choice === "Open") await vscode.env.openExternal(target);
+    if (choice === "Show in folder") await vscode.commands.executeCommand("revealFileInOS", target);
   }
 
   // ── AI setup ─────────────────────────────────────────────────────────────

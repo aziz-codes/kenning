@@ -13,6 +13,8 @@ export interface DiffLine {
   text: string;
   oldNo?: number;
   newNo?: number;
+  /** The parts of the line that actually changed, as [start, end) offsets. */
+  em?: [number, number][];
 }
 
 export type HunkKind = "edit" | "new" | "deleted";

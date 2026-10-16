@@ -113,6 +113,12 @@ exports.run = async function run() {
     await until(() => api.state().cards.some((c) => c.file === "src/price.js"), "card from external change", 20000);
     const card = api.state().cards.find((c) => c.file === "src/price.js");
     assert.ok(card.risks.some((r) => r.id === "todo"));
+    assert.equal(card.lang, "javascript");
+    const del = card.lines.find((l) => l.kind === "del");
+    const add = card.lines.find((l) => l.kind === "add");
+    const cut = (l) => l.em.map(([a, b]) => l.text.slice(a, b));
+    assert.deepEqual(cut(del), ["1.2"]);
+    assert.deepEqual(cut(add), ["1.25", "// TODO confirm VAT"]);
     await api.send({ type: "understood", key: card.key });
     assert.equal(api.state().cards.length, 0);
   });
@@ -139,8 +145,15 @@ exports.run = async function run() {
     await until(() => api.state().cards.some((c) => c.file === "src/new.js" && c.kind === "new"), "new-file card");
   });
 
-  await step("the review panel opens", async () => {
+  await step("the review panel opens and the walkthrough is registered", async () => {
     await vscode.commands.executeCommand("kenning.focus");
+    const walkthroughs = ext.packageJSON.contributes.walkthroughs;
+    assert.equal(walkthroughs[0].steps.length, 5);
+    for (const step of walkthroughs[0].steps) {
+      const media = step.media.image || step.media.markdown;
+      assert.ok(fs.existsSync(path.join(ext.extensionPath, media)), media);
+    }
+    assert.ok(fs.existsSync(path.join(ext.extensionPath, "media", "fonts", "newsreader-latin-opsz-normal.woff2")));
   });
 
   await step("disconnect removes only Kenning's hooks", async () => {
