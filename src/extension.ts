@@ -4,32 +4,96 @@ import os from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
 import { formatFlagsForAgent } from "./core/flags";
-import { addKenningHooks, hasKenningHooks, removeKenningHooks } from "./core/hooksConfig";
-import { firstChangedLine, hunkToText } from "./core/hunks";
+import {
+  addCursorHooks,
+  addKenningHooks,
+  CLAUDE_EVENTS,
+  CODEX_EVENTS,
+  hasCursorHooks,
+  hasKenningHooks,
+  HOOK_COMMAND,
+  removeCursorHooks,
+  removeKenningHooks,
+} from "./core/hooksConfig";
+import { firstChangedLine, fullFileDiff, hunkToText } from "./core/hunks";
 import { languageFor, markInlineChanges } from "./core/inline";
-import type { Outcome } from "./core/types";
+import { buildReport } from "./core/report";
+import type { AgentId, Outcome } from "./core/types";
 import { Insights, type InsightConfig, type Provider } from "./services/insights";
 import { Review, type Entry } from "./services/review";
-import { reviewedCount, Stats, streak, understandingScore } from "./services/stats";
+import { bestStreak, lastDays, reviewedCount, Stats, streak, understandingScore } from "./services/stats";
 import { Store } from "./services/store";
-import type { CardView, FromView, ViewState } from "./webview/protocol";
+import type { AgentView, CardView, FromView, ToView, ViewState } from "./webview/protocol";
 
 const API_KEY_SECRET = "kenning.anthropicApiKey";
 const BASE_SCHEME = "kenning-base";
 const MAX_CARD_LINES = 400;
 const STALE_TURN_MS = 30 * 60 * 1000;
+const PANEL_TYPE = "kenning.review";
+const MAX_FILE_LINES = 6000;
 
 /** Paths that are build output, dependencies or tooling noise. */
 const IGNORED =
-  /(^|\/)(\.git|node_modules|\.kenning|\.claude|dist|out|build|\.next|\.nuxt|\.svelte-kit|coverage|__pycache__|\.venv|venv|target|\.gradle|\.idea|\.vscode-test|\.turbo|\.cache)(\/|$)|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.(log|map|min\.js|lock|tmp|swp|DS_Store)$/;
+  /(^|\/)(\.git|node_modules|\.kenning|\.claude|dist|out|build|\.next|\.nuxt|\.svelte-kit|coverage|__pycache__|\.venv|venv|target|\.gradle|\.idea|\.vscode-test|\.turbo|\.cache)(\/|$)|(^|\/)\.(codex|cursor)\/hooks\.json$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.(log|map|min\.js|lock|tmp|swp|DS_Store)$/;
 
 interface Root {
   folder: vscode.WorkspaceFolder;
   store: Store;
   offset: number;
-  connected: boolean;
+  /** Agents whose hooks are installed in this folder. */
+  agents: Set<AgentId>;
   git?: boolean;
 }
+
+type Json = Record<string, unknown>;
+
+/** How Kenning plugs into each agent's hook settings. */
+interface AgentDef {
+  id: AgentId;
+  name: string;
+  /** The agent's hook settings, relative to the folder. */
+  file: string;
+  add(settings: Json, root: string): Json;
+  remove(settings: Json): Json;
+  has(settings: Json): boolean;
+  connected: string;
+}
+
+/** Forward slashes work for node on every platform and need no escaping in JSON. */
+const hookCommand = (root: string, agent: AgentId) =>
+  `node "${path.join(root, ".kenning", "hook.js").split(path.sep).join("/")}" --agent ${agent}`;
+
+const AGENTS: AgentDef[] = [
+  {
+    id: "claude",
+    name: "Claude Code",
+    file: ".claude/settings.local.json",
+    add: (s) => addKenningHooks(s, HOOK_COMMAND, CLAUDE_EVENTS),
+    remove: (s) => removeKenningHooks(s),
+    has: (s) => hasKenningHooks(s, CLAUDE_EVENTS),
+    connected: "Kenning is connected. Changes from your next Claude Code prompt will appear in the Kenning panel.",
+  },
+  {
+    id: "codex",
+    name: "Codex",
+    file: ".codex/hooks.json",
+    add: (s, root) => addKenningHooks(s, hookCommand(root, "codex"), CODEX_EVENTS),
+    remove: (s) => removeKenningHooks(s),
+    has: (s) => hasKenningHooks(s, CODEX_EVENTS),
+    connected:
+      "Kenning is connected to Codex. Codex runs new hooks only after you trust them: run /hooks in Codex once, and make sure this project is trusted.",
+  },
+  {
+    id: "cursor",
+    name: "Cursor",
+    file: ".cursor/hooks.json",
+    add: (s, root) => addCursorHooks(s, hookCommand(root, "cursor")),
+    remove: (s) => removeCursorHooks(s),
+    has: (s) => hasCursorHooks(s),
+    connected: "Kenning is connected to Cursor. Changes from Cursor's agent will appear here, and your flags reach it when its turn finishes.",
+  },
+];
+const agentDef = (id: AgentId) => AGENTS.find((a) => a.id === id)!;
 
 function run(cmd: string, args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) =>
@@ -42,6 +106,7 @@ function run(cmd: string, args: string[], cwd: string): Promise<string> {
 class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentProvider {
   private roots: Root[] = [];
   private view?: vscode.WebviewView;
+  private panel?: vscode.WebviewPanel;
   private status: vscode.StatusBarItem;
   private review: Review;
   private stats: Stats;
@@ -51,7 +116,8 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
   private index = 0;
   private apiKey?: string;
   private claudeAvailable = false;
-  private agent = { working: false, since: 0, last: 0 };
+  private codexAvailable = false;
+  private agent: { working: boolean; since: number; last: number; id?: AgentId } = { working: false, since: 0, last: 0 };
   private externalUntil = 0;
   private flagNote?: string;
   private flagNoteTimer?: NodeJS.Timeout;
@@ -73,6 +139,9 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     ctx.subscriptions.push(
       this.status,
       vscode.window.registerWebviewViewProvider("kenning.deck", this, { webviewOptions: { retainContextWhenHidden: true } }),
+      vscode.window.registerWebviewPanelSerializer(PANEL_TYPE, {
+        deserializeWebviewPanel: async (panel) => this.attachPanel(panel),
+      }),
       vscode.workspace.registerTextDocumentContentProvider(BASE_SCHEME, this),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.loadRoots()),
       vscode.workspace.onDidChangeConfiguration((e) => {
@@ -85,8 +154,14 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
           this.scheduleRefresh();
         }
       }),
-      vscode.commands.registerCommand("kenning.connectClaude", () => this.connectClaude()),
-      vscode.commands.registerCommand("kenning.disconnectClaude", () => this.disconnectClaude()),
+      vscode.commands.registerCommand("kenning.connectClaude", () => this.connectAgent("claude")),
+      vscode.commands.registerCommand("kenning.connectCodex", () => this.connectAgent("codex")),
+      vscode.commands.registerCommand("kenning.connectCursor", () => this.connectAgent("cursor")),
+      vscode.commands.registerCommand("kenning.connectAgent", (id?: AgentId) => this.connectAgent(id)),
+      vscode.commands.registerCommand("kenning.disconnectClaude", () => this.disconnectAgent("claude")),
+      vscode.commands.registerCommand("kenning.disconnectAgent", (id?: AgentId) => this.disconnectAgent(id)),
+      vscode.commands.registerCommand("kenning.openPanel", () => this.openPanel()),
+      vscode.commands.registerCommand("kenning.copyReport", () => this.copyReport()),
       vscode.commands.registerCommand("kenning.reviewUncommitted", () => this.reviewUncommitted()),
       vscode.commands.registerCommand("kenning.focus", () => vscode.commands.executeCommand("kenning.deck.focus")),
       vscode.commands.registerCommand("kenning.setApiKey", () => this.setApiKey()),
@@ -116,9 +191,9 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
       const existing = this.roots.find((r) => r.folder.uri.toString() === folder.uri.toString());
       if (existing) return existing;
       const store = new Store(folder.uri.fsPath);
-      const root: Root = { folder, store, offset: store.eventsSize(), connected: false };
-      root.connected = this.readHooksInstalled(root);
-      if (root.connected) this.installHookScript(root);
+      const root: Root = { folder, store, offset: store.eventsSize(), agents: new Set() };
+      for (const a of AGENTS) if (this.readHooksInstalled(root, a)) root.agents.add(a.id);
+      if (root.agents.size) this.installHookScript(root);
       store.pruneFlags();
       return root;
     });
@@ -132,10 +207,38 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
 
   private async detectClaude() {
     const cmd = vscode.workspace.getConfiguration("kenning").get<string>("claudePath") || "claude";
-    this.claudeAvailable = await new Promise<boolean>((resolve) =>
-      execFile(cmd, ["--version"], { timeout: 15000, shell: process.platform === "win32", windowsHide: true }, (err) => resolve(!err)),
-    );
+    const has = (bin: string) =>
+      new Promise<boolean>((resolve) =>
+        execFile(bin, ["--version"], { timeout: 15000, shell: process.platform === "win32", windowsHide: true }, (err) => resolve(!err)),
+      );
+    [this.claudeAvailable, this.codexAvailable] = await Promise.all([has(cmd), has("codex")]);
     this.scheduleRefresh();
+  }
+
+  private isCursor() {
+    return /cursor/i.test(vscode.env.appName) || fs.existsSync(path.join(os.homedir(), ".cursor"));
+  }
+
+  private agentViews(): AgentView[] {
+    const available: Record<AgentId, boolean> = { claude: this.claudeAvailable, codex: this.codexAvailable, cursor: this.isCursor() };
+    return AGENTS.map((a) => ({
+      id: a.id,
+      name: a.name,
+      connected: this.roots.some((r) => r.agents.has(a.id)),
+      available: available[a.id],
+    }));
+  }
+
+  private isConnected() {
+    return this.roots.some((r) => r.agents.size > 0);
+  }
+
+  /** Who is (or was last) at work: the agent from the latest hook event, else the only connected one. */
+  private agentName(): string {
+    const short = (id: AgentId) => (id === "claude" ? "Claude" : agentDef(id).name);
+    if (this.agent.id) return short(this.agent.id);
+    const connected = AGENTS.filter((a) => this.roots.some((r) => r.agents.has(a.id)));
+    return connected.length === 1 ? short(connected[0].id) : "Agent";
   }
 
   private insightConfig(): InsightConfig {
@@ -153,22 +256,22 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     };
   }
 
-  // ── Claude Code hooks ────────────────────────────────────────────────────
-  private settingsPath(root: Root) {
-    return path.join(root.folder.uri.fsPath, ".claude", "settings.local.json");
+  // ── Agent hooks ──────────────────────────────────────────────────────────
+  private settingsPath(root: Root, agent: AgentDef) {
+    return path.join(root.folder.uri.fsPath, ...agent.file.split("/"));
   }
 
-  private readSettings(root: Root): Record<string, unknown> | null {
+  private readSettings(root: Root, agent: AgentDef): Json | null {
     try {
-      return JSON.parse(fs.readFileSync(this.settingsPath(root), "utf8"));
+      return JSON.parse(fs.readFileSync(this.settingsPath(root, agent), "utf8"));
     } catch (e) {
       return (e as NodeJS.ErrnoException).code === "ENOENT" ? {} : null;
     }
   }
 
-  private readHooksInstalled(root: Root) {
-    const s = this.readSettings(root);
-    return !!s && hasKenningHooks(s as never);
+  private readHooksInstalled(root: Root, agent: AgentDef) {
+    const s = this.readSettings(root, agent);
+    return !!s && agent.has(s);
   }
 
   private installHookScript(root: Root) {
@@ -185,33 +288,55 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     return picked?.map((p) => p.root) ?? [];
   }
 
-  async connectClaude() {
+  private async pickAgent(placeHolder: string, only?: (a: AgentView) => boolean): Promise<AgentId | undefined> {
+    const views = this.agentViews().filter(only ?? (() => true));
+    if (views.length === 1) return views[0].id;
+    const pick = await vscode.window.showQuickPick(
+      views.map((a) => ({
+        label: a.name,
+        description: a.connected ? "connected" : a.available ? "detected" : "",
+        detail: `Adds Kenning's hooks to ${agentDef(a.id).file}`,
+        id: a.id,
+      })),
+      { placeHolder },
+    );
+    return pick?.id;
+  }
+
+  async connectAgent(id?: AgentId) {
     if (!this.roots.length) return vscode.window.showWarningMessage("Kenning: open a folder first.");
-    for (const root of await this.pickRoots("Connect which folders to Claude Code?")) {
-      const settings = this.readSettings(root);
+    id ??= await this.pickAgent("Connect Kenning to which agent?");
+    if (!id) return;
+    const agent = agentDef(id);
+    let done = 0;
+    for (const root of await this.pickRoots(`Connect which folders to ${agent.name}?`)) {
+      const settings = this.readSettings(root, agent);
+      const file = this.settingsPath(root, agent);
       if (!settings) {
-        vscode.window.showErrorMessage(`Kenning: ${this.settingsPath(root)} is not valid JSON, so it was left untouched.`);
+        vscode.window.showErrorMessage(`Kenning: ${file} is not valid JSON, so it was left untouched.`);
         continue;
       }
       this.installHookScript(root);
-      fs.mkdirSync(path.dirname(this.settingsPath(root)), { recursive: true });
-      fs.writeFileSync(this.settingsPath(root), JSON.stringify(addKenningHooks(settings as never), null, 2) + "\n");
-      await this.keepOutOfGit(root, ".claude/settings.local.json");
-      root.connected = true;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(agent.add(settings, root.folder.uri.fsPath), null, 2) + "\n");
+      await this.keepOutOfGit(root, agent.file);
+      root.agents.add(id);
       root.offset = root.store.eventsSize();
+      done++;
     }
     this.refresh();
-    vscode.window.showInformationMessage(
-      "Kenning is connected. Changes from your next Claude Code prompt will appear in the Kenning panel.",
-    );
+    if (done) vscode.window.showInformationMessage(agent.connected);
   }
 
-  async disconnectClaude() {
+  async disconnectAgent(id?: AgentId) {
+    id ??= await this.pickAgent("Disconnect Kenning from which agent?", (a) => a.connected);
+    if (!id) return;
+    const agent = agentDef(id);
     for (const root of await this.pickRoots("Disconnect which folders?")) {
-      const settings = this.readSettings(root);
-      if (!settings) continue;
-      fs.writeFileSync(this.settingsPath(root), JSON.stringify(removeKenningHooks(settings as never), null, 2) + "\n");
-      root.connected = false;
+      const settings = this.readSettings(root, agent);
+      if (!settings || !fs.existsSync(this.settingsPath(root, agent))) continue;
+      fs.writeFileSync(this.settingsPath(root, agent), JSON.stringify(agent.remove(settings), null, 2) + "\n");
+      root.agents.delete(id);
     }
     this.refresh();
   }
@@ -238,7 +363,7 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
 
   private async maybeOfferConnect() {
     const asked = this.ctx.workspaceState.get<boolean>("kenning.askedConnect");
-    if (asked || !this.claudeAvailable || this.roots.some((r) => r.connected)) return;
+    if (asked || !this.claudeAvailable || this.isConnected()) return;
     const likely = this.roots.some(
       (r) => fs.existsSync(path.join(r.folder.uri.fsPath, ".claude")) || fs.existsSync(path.join(r.folder.uri.fsPath, "CLAUDE.md")),
     );
@@ -249,7 +374,7 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
       "Connect",
       "Not now",
     );
-    if (choice === "Connect") await this.connectClaude();
+    if (choice === "Connect") await this.connectAgent("claude");
   }
 
   // ── Events from the hook ─────────────────────────────────────────────────
@@ -263,6 +388,7 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
       for (const e of events) {
         const at = Date.parse(e.t) || Date.now();
         this.agent.last = Math.max(this.agent.last, at);
+        this.agent.id = e.agent ?? "claude";
         if (e.type === "turn-start") {
           this.agent.working = true;
           this.agent.since = at;
@@ -290,9 +416,9 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     const enabled = vscode.workspace.getConfiguration("kenning").get<boolean>("notifyOnFinish") ?? true;
     setTimeout(() => {
       const waiting = this.entries.filter((e) => !e.outcome).length;
-      if (!enabled || !waiting || this.view?.visible) return;
+      if (!enabled || !waiting || this.view?.visible || this.panel?.visible) return;
       void vscode.window
-        .showInformationMessage(`Claude finished. ${waiting} change${waiting === 1 ? "" : "s"} waiting in Kenning.`, "Review")
+        .showInformationMessage(`${this.agentName()} finished. ${waiting} change${waiting === 1 ? "" : "s"} waiting in Kenning.`, "Review")
         .then((c) => c === "Review" && vscode.commands.executeCommand("kenning.focus"));
     }, 400);
   }
@@ -323,7 +449,12 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     this.insights.retain(new Set(this.entries.map((e) => e.card.hunk.id)));
 
     this.updateStatus();
-    void this.view?.webview.postMessage({ type: "state", state: this.viewState() });
+    this.post({ type: "state", state: this.viewState() });
+  }
+
+  private post(m: ToView) {
+    void this.view?.webview.postMessage(m);
+    void this.panel?.webview.postMessage(m);
   }
 
   private surrounding(e: Entry): string | undefined {
@@ -340,6 +471,15 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
 
   receive(m: FromView) {
     return this.onMessage(m);
+  }
+
+  panelOpen() {
+    return !!this.panel;
+  }
+
+  fileFor(key: string) {
+    const e = this.entry(key);
+    return e && this.fileView(e);
   }
 
   private viewState(): ViewState {
@@ -371,9 +511,11 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
         result: e.outcome ? { outcome: e.outcome, picked: e.picked, answer: insight?.answer } : undefined,
       };
     });
+    const days = this.stats.all();
     return {
-      agent: { working: this.isAgentWorking(), since: this.agent.working ? this.agent.since : undefined, name: this.agent.working ? "Claude" : this.roots.some((r) => r.connected) ? "Claude" : "Agent" },
-      connected: this.roots.some((r) => r.connected),
+      agent: { working: this.isAgentWorking(), since: this.agent.working ? this.agent.since : undefined, name: this.agentName() },
+      connected: this.isConnected(),
+      agents: this.agentViews(),
       claudeAvailable: this.claudeAvailable,
       hasWorkspace: this.roots.length > 0,
       provider: cfg.provider,
@@ -386,6 +528,16 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
         flagged: today.flagged,
       },
       pendingLines: this.entries.filter((e) => !e.outcome).reduce((n, e) => n + e.card.hunk.added, 0),
+      history: lastDays(days, 30).map((d) => ({
+        day: d.day,
+        reviewed: reviewedCount(d),
+        understood: d.correct + d.understood,
+        wrong: d.wrong,
+        flagged: d.flagged,
+        skipped: d.skipped,
+        score: understandingScore(d),
+      })),
+      bestStreak: bestStreak(days),
       cards,
       index: this.index,
       flagNote: this.flagNote,
@@ -403,31 +555,54 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     if (this.view) this.view.badge = waiting ? { value: waiting, tooltip: `${waiting} changes to review` } : undefined;
   }
 
-  // ── Webview ──────────────────────────────────────────────────────────────
-  resolveWebviewView(view: vscode.WebviewView) {
-    this.view = view;
+  // ── Webviews: the sidebar deck and the full review in an editor tab ─────
+  private html(webview: vscode.Webview, mode: "sidebar" | "panel") {
     const media = vscode.Uri.joinPath(this.ctx.extensionUri, "media");
     const dist = vscode.Uri.joinPath(this.ctx.extensionUri, "dist");
-    view.webview.options = { enableScripts: true, localResourceRoots: [media, dist] };
+    webview.options = { enableScripts: true, localResourceRoots: [media, dist] };
     const nonce = Array.from({ length: 24 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
-    const css = view.webview.asWebviewUri(vscode.Uri.joinPath(media, "webview.css"));
-    const js = view.webview.asWebviewUri(vscode.Uri.joinPath(dist, "webview.js"));
-    view.webview.html = `<!doctype html>
+    const css = webview.asWebviewUri(vscode.Uri.joinPath(media, "webview.css"));
+    const js = webview.asWebviewUri(vscode.Uri.joinPath(dist, "webview.js"));
+    return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${view.webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${view.webview.cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="${css}"><title>Kenning</title></head>
-<body><div id="app"></div><script nonce="${nonce}" src="${js}"></script></body></html>`;
-    view.webview.onDidReceiveMessage((m: FromView) => this.onMessage(m));
+<body data-mode="${mode}"><div id="app"></div><script nonce="${nonce}" src="${js}"></script></body></html>`;
+  }
+
+  resolveWebviewView(view: vscode.WebviewView) {
+    this.view = view;
+    view.webview.html = this.html(view.webview, "sidebar");
+    view.webview.onDidReceiveMessage((m: FromView) => this.onMessage(m, view.webview));
     view.onDidChangeVisibility(() => view.visible && this.refresh());
     view.onDidDispose(() => (this.view = undefined));
+  }
+
+  openPanel() {
+    if (this.panel) return this.panel.reveal();
+    const panel = vscode.window.createWebviewPanel(PANEL_TYPE, "Kenning Review", vscode.ViewColumn.Active, {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+    });
+    this.attachPanel(panel);
+  }
+
+  private attachPanel(panel: vscode.WebviewPanel) {
+    this.panel?.dispose();
+    this.panel = panel;
+    panel.iconPath = vscode.Uri.joinPath(this.ctx.extensionUri, "media", "icon.png");
+    panel.webview.html = this.html(panel.webview, "panel");
+    panel.webview.onDidReceiveMessage((m: FromView) => this.onMessage(m, panel.webview));
+    panel.onDidChangeViewState(() => panel.visible && this.refresh());
+    panel.onDidDispose(() => this.panel === panel && (this.panel = undefined));
   }
 
   private entry(key: string) {
     return this.entries.find((e) => e.key === key);
   }
 
-  private async onMessage(m: FromView) {
+  private async onMessage(m: FromView, from?: vscode.Webview) {
     switch (m.type) {
       case "ready":
         return this.refresh();
@@ -457,15 +632,27 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
         return this.move(m.index);
       case "openDiff": {
         const e = this.entry(m.key);
-        return e && this.openDiff(e);
+        // From the full review tab, open the diff next to it rather than over it.
+        return e && this.openDiff(e, from && from === this.panel?.webview ? vscode.ViewColumn.Beside : undefined);
       }
+      case "loadFile": {
+        const e = this.entry(m.key);
+        if (e && from) void from.postMessage(this.fileView(e));
+        return;
+      }
+      case "openPanel":
+        return this.openPanel();
+      case "copyReport":
+        return this.copyReport();
+      case "connectAgent":
+        return this.connectAgent(m.agent);
       case "retryAi": {
         const e = this.entry(m.key);
         if (e) this.insights.request(e.card, this.surrounding(e), { retry: true });
         return;
       }
       case "connectClaude":
-        return this.connectClaude();
+        return this.connectAgent("claude");
       case "reviewUncommitted":
         return this.reviewUncommitted();
       case "setupAi":
@@ -475,9 +662,27 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     }
   }
 
-  private async resolve(e: Entry, outcome: Outcome, picked?: number, keepShowing = false) {
+  private async resolve(e: Entry, outcome: Outcome, picked?: number, keepShowing = false, comment?: string) {
     await this.review.resolve(e, outcome, picked, { keepShowing });
     await this.stats.record(outcome);
+    const { hunk } = e.card;
+    try {
+      e.store.appendJournal({
+        t: new Date().toISOString(),
+        file: hunk.file,
+        line: firstChangedLine(hunk),
+        kind: hunk.kind,
+        headline: e.card.headline,
+        summary: this.insights.get(hunk.id)?.insight?.summary,
+        outcome,
+        added: hunk.added,
+        removed: hunk.removed,
+        risks: e.card.risks.map((r) => ({ severity: r.severity, title: r.title })),
+        comment,
+      });
+    } catch {
+      // The journal only feeds reports; never block a review on it.
+    }
     if (!keepShowing) this.currentKey = undefined; // the card leaves; the next one slides in
     this.refresh();
   }
@@ -505,12 +710,18 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
       comment,
       excerpt: hunkToText(e.card.hunk, 12),
     };
-    if (root?.connected) {
+    if (root?.agents.size) {
       e.store.addFlag(flag);
+      const name = this.agentName();
+      const cursorOnly = root.agents.size === 1 && root.agents.has("cursor");
       this.setFlagNote(
-        this.agent.working
-          ? "Sent. Claude will address this before it finishes."
-          : "Saved. Claude will get this with your next message.",
+        cursorOnly
+          ? this.agent.working
+            ? "Sent. Cursor will pick this up as soon as its turn finishes."
+            : "Saved. Cursor gets this when its next turn finishes."
+          : this.agent.working
+            ? `Sent. ${name} will address this before it finishes.`
+            : `Saved. ${name} will get this with your next message.`,
       );
     } else {
       await vscode.env.clipboard.writeText(
@@ -518,7 +729,7 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
       );
       this.setFlagNote("Copied. Paste it into your agent's chat.");
     }
-    await this.resolve(e, "flagged");
+    await this.resolve(e, "flagged", undefined, false, comment);
   }
 
   private setFlagNote(note: string) {
@@ -536,18 +747,35 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     return root?.store.getBaseline(uri.path.replace(/^\//, ""))?.content ?? "";
   }
 
-  private async openDiff(e: Entry) {
+  /** The card's whole file as one diff, for the full-file view. */
+  private fileView(e: Entry): ToView {
+    const { hunk } = e.card;
+    const before = e.store.getBaseline(hunk.file)?.content ?? null;
+    const after = e.store.readCurrent(hunk.file);
+    let { lines, focus } = fullFileDiff(before, after, hunk);
+    let truncated = false;
+    if (lines.length > MAX_FILE_LINES) {
+      const from = Math.max(0, Math.min(focus[0] - MAX_FILE_LINES / 2, lines.length - MAX_FILE_LINES));
+      lines = lines.slice(from, from + MAX_FILE_LINES);
+      focus = [focus[0] - from, focus[1] - from];
+      truncated = true;
+    }
+    return { type: "file", key: e.key, lines: markInlineChanges(lines), focus, truncated };
+  }
+
+  private async openDiff(e: Entry, viewColumn?: vscode.ViewColumn) {
     const { hunk } = e.card;
     const rootIndex = this.roots.findIndex((r) => r.store === e.store);
     const fileUri = vscode.Uri.file(e.store.abs(hunk.file));
     const baseUri = vscode.Uri.from({ scheme: BASE_SCHEME, path: `/${hunk.file}`, query: String(rootIndex) });
     const line = Math.max(0, firstChangedLine(hunk) - 1);
     const selection = new vscode.Range(line, 0, line, 0);
-    if (hunk.kind === "new") return vscode.window.showTextDocument(fileUri, { selection, preview: true });
-    if (hunk.kind === "deleted") return vscode.window.showTextDocument(baseUri, { preview: true });
+    if (hunk.kind === "new") return vscode.window.showTextDocument(fileUri, { selection, preview: true, viewColumn });
+    if (hunk.kind === "deleted") return vscode.window.showTextDocument(baseUri, { preview: true, viewColumn });
     await vscode.commands.executeCommand("vscode.diff", baseUri, fileUri, `${path.basename(hunk.file)}: before AI ↔ now`, {
       selection,
       preview: true,
+      viewColumn,
     });
   }
 
@@ -607,6 +835,29 @@ class Kenning implements vscode.WebviewViewProvider, vscode.TextDocumentContentP
     this.refresh();
     await vscode.commands.executeCommand("kenning.focus");
     if (!added && !this.entries.length) vscode.window.showInformationMessage("Kenning: no uncommitted changes to review.");
+  }
+
+  // ── Report ───────────────────────────────────────────────────────────────
+  async copyReport() {
+    const periods = [
+      { label: "Today", days: 0 },
+      { label: "Last 7 days", days: 6 },
+      { label: "Last 30 days", days: 29 },
+    ];
+    const pick = await vscode.window.showQuickPick(periods, { placeHolder: "Summarise the AI changes you reviewed…" });
+    if (!pick) return;
+    const since = new Date();
+    since.setHours(0, 0, 0, 0);
+    since.setDate(since.getDate() - pick.days);
+    const multi = this.roots.length > 1;
+    const entries = this.roots
+      .flatMap((r) => r.store.readJournal(since.toISOString()).map((e) => (multi ? { ...e, file: `${r.folder.name}/${e.file}` } : e)))
+      .sort((a, b) => a.t.localeCompare(b.t));
+    const markdown = buildReport(entries, pick.label);
+    await vscode.env.clipboard.writeText(markdown);
+    const doc = await vscode.workspace.openTextDocument({ language: "markdown", content: markdown });
+    await vscode.window.showTextDocument(doc, { preview: true });
+    vscode.window.showInformationMessage("Kenning: review summary copied, ready for your pull request.");
   }
 
   // ── Share card ───────────────────────────────────────────────────────────
@@ -695,6 +946,10 @@ class ExternalTracker {
         remember(d);
       }),
       vscode.workspace.onDidCloseTextDocument((d) => this.known.delete(d.uri.fsPath)),
+      // Changing a setting makes VS Code itself rewrite .vscode/settings.json.
+      vscode.workspace.onDidChangeConfiguration(() => {
+        for (const f of vscode.workspace.workspaceFolders ?? []) this.userSaved.set(path.join(f.uri.fsPath, ".vscode", "settings.json"), Date.now());
+      }),
       files.onDidChange((u) => this.changed(u, "change")),
       files.onDidCreate((u) => this.changed(u, "create")),
       files.onDidDelete((u) => this.changed(u, "delete")),
@@ -734,7 +989,7 @@ class ExternalTracker {
   }
 
   private async capture(root: Root, rel: string, abs: string, kind: "change" | "create" | "delete") {
-    if (Date.now() < this.gitBusyUntil) return;
+    if (Date.now() < this.gitBusyUntil || Date.now() - (this.userSaved.get(abs) ?? 0) < 4000) return;
     const current = root.store.readCurrent(rel);
     if (root.store.hasBaseline(rel)) {
       if (current !== null) this.known.set(abs, current);
@@ -762,6 +1017,8 @@ export async function activate(ctx: vscode.ExtensionContext) {
     state: () => kenning.currentState(),
     send: (m: FromView) => kenning.receive(m),
     refresh: () => kenning.refresh(),
+    panelOpen: () => kenning.panelOpen(),
+    file: (key: string) => kenning.fileFor(key),
   };
 }
 

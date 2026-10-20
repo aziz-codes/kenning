@@ -84,3 +84,17 @@ export function hunkToText(h: Hunk, maxLines = 120): string {
   if (h.lines.length > maxLines) body.push(`… (${h.lines.length - maxLines} more lines)`);
   return body.join("\n");
 }
+
+/**
+ * The whole file as one diff, with the [start, end] line indexes of `hunk`
+ * inside it, so a card can be shown in the context of its file.
+ */
+export function fullFileDiff(before: string | null, after: string | null, hunk: Hunk): { lines: DiffLine[]; focus: [number, number] } {
+  const whole = buildHunks(hunk.file, before, after, 1_000_000);
+  const lines = whole.flatMap((h) => h.lines);
+  const changed = hunk.lines.filter((l) => l.kind !== "ctx");
+  const same = (a: DiffLine, b: DiffLine) => a.kind === b.kind && a.oldNo === b.oldNo && a.newNo === b.newNo;
+  const start = changed.length ? lines.findIndex((l) => same(l, changed[0])) : -1;
+  const last = changed.length ? lines.findIndex((l) => same(l, changed[changed.length - 1])) : -1;
+  return { lines, focus: start < 0 ? [0, 0] : [start, Math.max(start, last)] };
+}

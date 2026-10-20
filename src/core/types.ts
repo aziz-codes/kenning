@@ -62,8 +62,10 @@ export interface Flag {
   deliveredAt?: string;
 }
 
-/** One line of .kenning/events.jsonl, written by the Claude Code hook. */
+export type AgentId = "claude" | "codex" | "cursor";
+
+/** One line of .kenning/events.jsonl, written by an agent's hook. */
 export type AgentEvent =
-  | { t: string; type: "turn-start"; session?: string }
-  | { t: string; type: "edit"; file: string; tool: string; session?: string }
-  | { t: string; type: "turn-end"; session?: string; blocked?: number };
+  | { t: string; type: "turn-start"; session?: string; agent?: AgentId }
+  | { t: string; type: "edit"; file: string; tool: string; session?: string; agent?: AgentId }
+  | { t: string; type: "turn-end"; session?: string; blocked?: number; agent?: AgentId };

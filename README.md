@@ -2,26 +2,41 @@
 
 **Understand the code your AI writes, while it writes it.**
 
-Coding agents like Claude Code, Codex and Copilot now write most of the code, often faster than anyone can read it. You end up waiting while the agent works, then approving changes you never really read. Kenning turns that waiting time into a quick, focused review.
+Coding agents like Claude Code, Codex, Cursor and Copilot now write most of the code, often faster than anyone can read it. You end up waiting while the agent works, then approving changes you never really read. Kenning turns that waiting time into a quick, focused review.
 
 While your agent works, every change it makes becomes a short card in the Kenning panel:
 
 - **What changed, in plain English.** One line, plus the likely reason for the change.
 - **What looks risky.** Removed tests or checks, deleted error handling, silenced type errors, secrets, new dependencies, shell calls, SQL built from strings, and more. All checks run locally.
 - **One quick question.** A 15-second check on what the change actually does. It's not trivia.
-- **Flag it, and the agent fixes it.** Write what's wrong and Kenning hands it straight to Claude Code, which addresses it *before it finishes*. If Claude is idle, it arrives with your next message.
+- **Flag it, and the agent fixes it.** Write what's wrong and Kenning hands it straight to your agent (Claude Code, Codex or Cursor), which addresses it *before it finishes*. If the agent is idle, it arrives with your next message.
 
 Code on the cards is syntax-highlighted in your theme's colours. In an edited line, only the part that changed lights up, so `1.2 → 1.25` stands out at a glance.
+
+Need more room than the sidebar? Click **⤢** on a card (or press `E`) to open the **full review** in an editor tab:
+
+- **Every changed file** in a list on the left, riskiest changes first.
+- **Side by side or unified** diffs at full width (`V`).
+- **The whole file** around a change, with the change marked (`W`).
+- **History**: your understanding score and reviews over the last 30 days (`H`).
+- **Copy review summary**: a Markdown summary of what you reviewed and flagged, ready to paste into a pull request.
 
 Your **understanding score** and daily streak show how much of today's AI code you actually understood. The *lines waiting* counter shows what you haven't looked at yet. **Share today** saves an image of your score, ready to post.
 
 ## Getting started
 
 1. Open the **Kenning** panel in the Activity Bar.
-2. Click **Connect Claude Code**. Kenning adds three small hooks to `.claude/settings.local.json`, your personal settings, which are never committed.
-3. Prompt Claude as usual. Cards appear as it edits files.
+2. Click **Connect** for your agent. Kenning adds a few small hooks to your agent's personal settings file and keeps that file out of git:
 
-Using **Codex, Cursor, Copilot agent mode, Aider** or scripts? You don't need to connect anything. Kenning notices files changed outside the editor and compares them with what they looked like before (or with your last commit). Your own saves and git operations like checkout are ignored. You can also run **Kenning: Review uncommitted changes** at any time.
+   | Agent | Hooks file | |
+   |---|---|---|
+   | Claude Code | `.claude/settings.local.json` | |
+   | Codex | `.codex/hooks.json` | Codex only runs hooks you trust: run `/hooks` in Codex once, in a trusted project. |
+   | Cursor | `.cursor/hooks.json` | Flags reach Cursor's agent as a follow-up when its turn finishes. |
+
+3. Prompt your agent as usual. Cards appear as it edits files.
+
+Using **Copilot agent mode, Aider** or scripts? You don't need to connect anything. Kenning notices files changed outside the editor and compares them with what they looked like before (or with your last commit). Your own saves and git operations like checkout are ignored. You can also run **Kenning: Review uncommitted changes** at any time.
 
 ## Keyboard
 
@@ -32,6 +47,10 @@ Using **Codex, Cursor, Copilot agent mode, Aider** or scripts? You don't need to
 | `F` | Flag for the agent |
 | `S` | Skip |
 | `D` | Open the before/after diff |
+| `E` | Open the full review in an editor tab |
+| `W` | Whole file (full review) |
+| `V` | Side by side / unified (full review) |
+| `H` | History (full review) |
 | `←` `→` | Previous / next change |
 
 ## AI questions
@@ -42,7 +61,7 @@ Kenning's own calls to Claude Code run in an isolated temporary directory, witho
 
 ## Privacy
 
-- Everything Kenning records stays in a `.kenning/` folder in your project, which is git-ignored automatically.
+- Everything Kenning records, including the review log behind History and summaries, stays in a `.kenning/` folder in your project, which is git-ignored automatically.
 - Diffs are sent only to the AI provider you chose (your Claude Code, or the Anthropic API with your key). They are never sent to Kenning or any other service.
 - Kenning has no telemetry.
 
@@ -59,4 +78,8 @@ Kenning's own calls to Claude Code run in an isolated temporary directory, witho
 
 ## Commands
 
-**Kenning: Connect to Claude Code** · **Disconnect from Claude Code** · **Review uncommitted changes** · **Set / Remove Anthropic API key** · **Reset understanding stats**
+**Kenning: Open full review** · **Connect to Claude Code / Codex / Cursor** · **Connect an agent…** · **Disconnect an agent…** · **Review uncommitted changes** · **Copy review summary (for a PR)** · **Set / Remove Anthropic API key** · **Reset understanding stats**
+
+## About
+
+Kenning is built by [aziz-codes](https://github.com/aziz-codes) ([website](https://aziz-dev.vercel.app/)). Found a bug or have an idea? [Open an issue](https://github.com/aziz-codes/kenning/issues) or email [aziz.codes44@gmail.com](mailto:aziz.codes44@gmail.com).

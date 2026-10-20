@@ -1,6 +1,6 @@
-# Codex, Cursor, Copilot, Aider…
+# Copilot, Aider, scripts…
 
-You don't need to connect anything. Kenning notices files that change outside the editor and compares them with what they looked like before, or with your last commit.
+Agents without hooks need nothing at all. Kenning notices files that change outside the editor and compares them with what they looked like before, or with your last commit.
 
 Your own saves are ignored, and so are git operations like checkout and pull.
 

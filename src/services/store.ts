@@ -7,11 +7,12 @@
 //     events.jsonl    turn-start / edit / turn-end, appended by the hook
 //     base/<id>.json  each file's content before the unreviewed changes
 //     flags/<id>.json the developer's flags, waiting for the agent
+//     journal.jsonl   every review, for history and reports
 
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { AgentEvent, Flag } from "../core/types";
+import type { AgentEvent, Flag, Outcome } from "../core/types";
 
 export interface Baseline {
   file: string;
@@ -20,7 +21,23 @@ export interface Baseline {
   createdAt: string;
 }
 
+/** One reviewed change, as kept in journal.jsonl. */
+export interface JournalEntry {
+  t: string;
+  file: string;
+  line: number;
+  kind: "edit" | "new" | "deleted";
+  headline: string;
+  summary?: string;
+  outcome: Outcome;
+  added: number;
+  removed: number;
+  risks: { severity: string; title: string }[];
+  comment?: string;
+}
+
 const MAX_EVENTS_BYTES = 512 * 1024;
+const MAX_JOURNAL_BYTES = 2 * 1024 * 1024;
 
 export class Store {
   readonly dir: string;
@@ -165,6 +182,42 @@ export class Store {
     } catch {
       return 0;
     }
+  }
+
+  // ── Journal ──────────────────────────────────────────────────────────────
+  appendJournal(e: JournalEntry) {
+    this.ensure();
+    const file = this.p("journal.jsonl");
+    try {
+      if (fs.statSync(file).size > MAX_JOURNAL_BYTES) {
+        const keep = fs.readFileSync(file, "utf8").split("\n").slice(-2000).join("\n");
+        this.writeAtomic(file, keep);
+      }
+    } catch {
+      // No file yet.
+    }
+    fs.appendFileSync(file, JSON.stringify(e) + "\n");
+  }
+
+  /** Reviews since `since` (an ISO date), oldest first. */
+  readJournal(since = ""): JournalEntry[] {
+    let text: string;
+    try {
+      text = fs.readFileSync(this.p("journal.jsonl"), "utf8");
+    } catch {
+      return [];
+    }
+    const out: JournalEntry[] = [];
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const e = JSON.parse(line) as JournalEntry;
+        if (e.t >= since) out.push(e);
+      } catch {
+        // Skip a corrupt line.
+      }
+    }
+    return out;
   }
 
   // ── Flags ────────────────────────────────────────────────────────────────

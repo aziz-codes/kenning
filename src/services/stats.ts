@@ -42,6 +42,38 @@ export function streak(days: Record<string, DayStats>, today = new Date()): numb
   return n;
 }
 
+/** The longest run of days with 3+ reviews. */
+export function bestStreak(days: Record<string, DayStats>): number {
+  let best = 0;
+  let run = 0;
+  let prev: Date | undefined;
+  for (const key of Object.keys(days).sort()) {
+    if (reviewedCount(days[key]) < 3) {
+      run = 0;
+      prev = undefined;
+      continue;
+    }
+    const d = new Date(`${key}T12:00:00`);
+    const next = prev && new Date(prev.getTime() + 24 * 3600 * 1000);
+    run = next && dayKey(next) === key ? run + 1 : 1;
+    prev = d;
+    best = Math.max(best, run);
+  }
+  return best;
+}
+
+/** The last `n` days, oldest first, with empty days filled in. */
+export function lastDays(days: Record<string, DayStats>, n: number, today = new Date()): ({ day: string } & DayStats)[] {
+  const out: ({ day: string } & DayStats)[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const day = dayKey(d);
+    out.push({ day, ...EMPTY, ...(days[day] ?? {}) });
+  }
+  return out;
+}
+
 export class Stats {
   constructor(private memo: Memento) {}
 

@@ -100,6 +100,12 @@ exports.run = async function run() {
     assert.equal(s.today.flagged, 1);
     assert.equal(s.today.score, 100);
     assert.ok(s.flagNote);
+    const journal = fs.readFileSync(path.join(root, ".kenning", "journal.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(journal.length, 1);
+    assert.equal(journal[0].outcome, "flagged");
+    assert.equal(journal[0].comment, "Keep the empty-cart check");
+    assert.equal(s.history.length, 30);
+    assert.equal(s.history[29].flagged, 1);
   });
 
   await step("the next prompt delivers the flag to the agent", async () => {
@@ -145,10 +151,74 @@ exports.run = async function run() {
     await until(() => api.state().cards.some((c) => c.file === "src/new.js" && c.kind === "new"), "new-file card");
   });
 
-  await step("the review panel opens and the walkthrough is registered", async () => {
+  await step("the full review opens in an editor tab", async () => {
+    await vscode.commands.executeCommand("kenning.openPanel");
+    await until(() => {
+      const tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs);
+      return tabs.some((t) => t.input instanceof vscode.TabInputWebview && t.input.viewType.includes("kenning.review"));
+    }, "review tab");
+    assert.equal(api.panelOpen(), true);
+    await vscode.commands.executeCommand("kenning.openPanel"); // a second call reveals, not duplicates
+    const count = vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((t) => t.input instanceof vscode.TabInputWebview && t.input.viewType.includes("kenning.review")).length;
+    assert.equal(count, 1);
+  });
+
+  await step("connects Codex and Cursor with their own hook files", async () => {
+    await vscode.commands.executeCommand("kenning.connectAgent", "codex");
+    await vscode.commands.executeCommand("kenning.connectAgent", "cursor");
+    const codex = JSON.parse(fs.readFileSync(path.join(root, ".codex", "hooks.json"), "utf8"));
+    assert.ok(codex.hooks.PreToolUse[0].hooks[0].command.includes(".kenning/hook.js\" --agent codex"));
+    const cursor = JSON.parse(fs.readFileSync(path.join(root, ".cursor", "hooks.json"), "utf8"));
+    assert.equal(cursor.version, 1);
+    assert.ok(cursor.hooks.stop[0].command.endsWith("--agent cursor"));
+    const exclude = fs.readFileSync(path.join(root, ".git", "info", "exclude"), "utf8");
+    assert.ok(exclude.includes(".codex/hooks.json") && exclude.includes(".cursor/hooks.json"));
+    const agents = Object.fromEntries(api.state().agents.map((a) => [a.id, a.connected]));
+    assert.equal(agents.codex, true);
+    assert.equal(agents.cursor, true);
+  });
+
+  await step("a Codex patch becomes a card, credited to Codex", async () => {
+    const run = (input) =>
+      cp.spawnSync("node", [path.join(root, ".kenning", "hook.js"), "--agent", "codex"], { input: JSON.stringify(input), cwd: root, encoding: "utf8" });
+    const cart = path.join(root, "src", "cart.js");
+    const patch = "*** Begin Patch\n*** Update File: src/cart.js\n@@\n-  return items.reduce((s, i) => s + i.price, 0);\n+  return items.reduce((s, i) => s + i.price * i.qty, 0);\n*** End Patch";
+    run({ hook_event_name: "UserPromptSubmit", cwd: root, prompt: "use qty" });
+    run({ hook_event_name: "PreToolUse", tool_name: "apply_patch", cwd: root, tool_input: { command: patch } });
+    fs.writeFileSync(cart, fs.readFileSync(cart, "utf8").replace("s + i.price, 0", "s + i.price * i.qty, 0"));
+    run({ hook_event_name: "PostToolUse", tool_name: "apply_patch", cwd: root, tool_input: { command: patch } });
+    await until(() => api.state().cards.some((c) => c.file === "src/cart.js"), "card from Codex");
+    const s = api.state();
+    assert.equal(s.agent.name, "Codex");
+    assert.equal(s.agent.working, true);
+    run({ hook_event_name: "Stop", cwd: root, stop_hook_active: false });
+    await until(() => !api.state().agent.working, "Codex idle");
+  });
+
+  await step("the whole-file view gets the file around the change", async () => {
+    const s = api.state();
+    const i = s.cards.findIndex((c) => c.file === "src/cart.js");
+    await api.send({ type: "goto", index: i });
+    const card = api.state().cards[api.state().index];
+    assert.equal(card.file, "src/cart.js");
+    const view = api.file(card.key);
+    assert.equal(view.type, "file");
+    assert.equal(view.lines.filter((l) => l.kind !== "del").length, 6);
+    assert.equal(view.lines[view.focus[0]].kind, "del");
+    assert.ok(view.lines[view.focus[1]].text.includes("i.qty"));
+  });
+
+  await step("disconnecting Codex and Cursor leaves empty, valid files", async () => {
+    await vscode.commands.executeCommand("kenning.disconnectAgent", "codex");
+    await vscode.commands.executeCommand("kenning.disconnectAgent", "cursor");
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, ".codex", "hooks.json"), "utf8")), {});
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, ".cursor", "hooks.json"), "utf8")), { version: 1 });
+  });
+
+  await step("the walkthrough is registered", async () => {
     await vscode.commands.executeCommand("kenning.focus");
     const walkthroughs = ext.packageJSON.contributes.walkthroughs;
-    assert.equal(walkthroughs[0].steps.length, 5);
+    assert.equal(walkthroughs[0].steps.length, 6);
     for (const step of walkthroughs[0].steps) {
       const media = step.media.image || step.media.markdown;
       assert.ok(fs.existsSync(path.join(ext.extensionPath, media)), media);

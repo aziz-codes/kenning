@@ -1,0 +1,35 @@
+<!-- Renders media/icon.png. Open with ?src=file:///path/to/Cinzel-Bold.ttf&w=700 and screenshot at 256x256, e.g.
+     google-chrome --headless=new --allow-file-access-from-files --default-background-color=00000000 --window-size=256,256 --virtual-time-budget=3000 --screenshot=media/icon.png "file://$PWD/scripts/icon.html?src=..."
+     Cinzel (OFL): https://fonts.google.com/specimen/Cinzel -->
+<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:transparent}</style></head><body>
+<svg id="s" xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<defs>
+  <radialGradient id="bg" cx="50%" cy="38%" r="75%"><stop offset="0" stop-color="#2a231a"/><stop offset="1" stop-color="#110e0a"/></radialGradient>
+  <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f6d58c"/><stop offset=".55" stop-color="#e3a33b"/><stop offset="1" stop-color="#b9771c"/></linearGradient>
+</defs>
+<rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bg)"/>
+<rect x="8.75" y="8.75" width="238.5" height="238.5" rx="53.25" fill="none" stroke="#fff" stroke-opacity=".06" stroke-width="1.5"/>
+<rect x="30" y="30" width="196" height="196" rx="34" fill="none" stroke="url(#gold)" stroke-opacity=".75" stroke-width="2"/>
+<rect x="37" y="37" width="182" height="182" rx="28" fill="none" stroke="#e3a33b" stroke-opacity=".3" stroke-width="1"/>
+<g fill="#e3a33b"><path d="M128 24.5 133 30 128 35.5 123 30Z"/><path d="M128 220.5 133 226 128 231.5 123 226Z"/><path d="M24.5 128 30 123 35.5 128 30 133Z"/><path d="M220.5 128 226 123 231.5 128 226 133Z"/></g>
+<text id="k" font-family="F" fill="url(#gold)">K</text>
+</svg>
+<script>
+const q = new URLSearchParams(location.search);
+const ff = new FontFace("F", `url(${q.get("src")})`, { weight: q.get("w") || "500" });
+document.fonts.add(ff);
+ff.load().then(() => {
+  const t = document.getElementById("k"), w = q.get("w") || "500";
+  const c = document.createElement("canvas").getContext("2d");
+  c.font = `${w} 100px F`;
+  const m = c.measureText("K");
+  const inkH = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
+  const inkW = m.actualBoundingBoxLeft + m.actualBoundingBoxRight;
+  // size the glyph by its ink, then centre the ink in the frame
+  const k = +(q.get("h") || 112) / inkH;
+  t.setAttribute("font-weight", w);
+  t.setAttribute("font-size", 100 * k);
+  t.setAttribute("x", 128 - (inkW / 2 - m.actualBoundingBoxLeft) * k);
+  t.setAttribute("y", 128 + (m.actualBoundingBoxAscent - inkH / 2) * k);
+});
+</script></body></html>

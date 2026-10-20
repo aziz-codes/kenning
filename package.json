@@ -1,10 +1,24 @@
 {
   "name": "kenning",
   "displayName": "Kenning — Understand the code your AI writes",
-  "description": "While Claude Code or any coding agent works, Kenning turns its changes into quick review cards: what changed, risky edits flagged, one quick question — and a one-click flag the agent fixes before it finishes.",
-  "version": "0.2.0",
+  "description": "While Claude Code, Codex, Cursor or any coding agent works, Kenning turns its changes into quick review cards: what changed, risky edits flagged, one quick question — and a one-click flag the agent fixes before it finishes.",
+  "version": "0.3.0",
   "publisher": "azizcodes",
   "license": "MIT",
+  "author": {
+    "name": "aziz-codes",
+    "email": "aziz.codes44@gmail.com",
+    "url": "https://aziz-dev.vercel.app/"
+  },
+  "homepage": "https://aziz-dev.vercel.app/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aziz-codes/kenning.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aziz-codes/kenning/issues",
+    "email": "aziz.codes44@gmail.com"
+  },
   "icon": "media/icon.png",
   "galleryBanner": {
     "color": "#16130f",
@@ -19,17 +33,20 @@
     "Other"
   ],
   "keywords": [
-    "claude code",
-    "ai",
-    "code review",
-    "comprehension",
     "agents",
+    "ai",
+    "claude code",
+    "code review",
     "codex",
+    "comprehension",
+    "copilot",
     "cursor",
-    "copilot"
+    "diff",
+    "pull request"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:kenning.review"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -63,6 +80,32 @@
         "category": "Kenning"
       },
       {
+        "command": "kenning.connectAgent",
+        "title": "Connect an agent…",
+        "category": "Kenning"
+      },
+      {
+        "command": "kenning.connectCodex",
+        "title": "Connect to Codex",
+        "category": "Kenning"
+      },
+      {
+        "command": "kenning.connectCursor",
+        "title": "Connect to Cursor",
+        "category": "Kenning"
+      },
+      {
+        "command": "kenning.disconnectAgent",
+        "title": "Disconnect an agent…",
+        "category": "Kenning"
+      },
+      {
+        "command": "kenning.openPanel",
+        "title": "Open full review",
+        "category": "Kenning",
+        "icon": "$(screen-full)"
+      },
+      {
         "command": "kenning.reviewUncommitted",
         "title": "Review uncommitted changes",
         "category": "Kenning"
@@ -85,6 +128,11 @@
       {
         "command": "kenning.resetStats",
         "title": "Reset understanding stats",
+        "category": "Kenning"
+      },
+      {
+        "command": "kenning.copyReport",
+        "title": "Copy review summary (for a PR)",
         "category": "Kenning"
       }
     ],
@@ -145,13 +193,16 @@
         "steps": [
           {
             "id": "connect",
-            "title": "Connect Claude Code",
-            "description": "Kenning plugs into Claude Code with three small, personal hooks.\n[Connect Claude Code](command:kenning.connectClaude)",
+            "title": "Connect your agent",
+            "description": "Kenning plugs into Claude Code, Codex or Cursor with a few small, personal hooks.\n[Connect Claude Code](command:kenning.connectClaude)\n[Connect another agent](command:kenning.connectAgent)",
             "media": {
               "markdown": "media/walkthrough/connect.md"
             },
             "completionEvents": [
-              "onCommand:kenning.connectClaude"
+              "onCommand:kenning.connectClaude",
+              "onCommand:kenning.connectAgent",
+              "onCommand:kenning.connectCodex",
+              "onCommand:kenning.connectCursor"
             ]
           },
           {
@@ -175,9 +226,20 @@
             }
           },
           {
+            "id": "panel",
+            "title": "Open the full review",
+            "description": "Need more room? Open the review in an editor tab: every changed file in a list, side-by-side diffs, the whole file around each change, and your history.\n[Open full review](command:kenning.openPanel)",
+            "media": {
+              "markdown": "media/walkthrough/panel.md"
+            },
+            "completionEvents": [
+              "onCommand:kenning.openPanel"
+            ]
+          },
+          {
             "id": "other",
-            "title": "Using another agent?",
-            "description": "Codex, Cursor, Copilot and Aider work too, with nothing to set up.\n[Review uncommitted changes](command:kenning.reviewUncommitted)",
+            "title": "Using Copilot, Aider or a script?",
+            "description": "Agents without hooks work too, with nothing to set up.\n[Review uncommitted changes](command:kenning.reviewUncommitted)",
             "media": {
               "markdown": "media/walkthrough/other.md"
             },
@@ -196,7 +258,16 @@
           }
         ]
       }
-    ]
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "kenning.openPanel",
+          "when": "view == kenning.deck",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "scripts": {
     "build": "node esbuild.mjs",
